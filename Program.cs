@@ -3,22 +3,26 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
-using System.Security.Claims; // Required for ClaimTypes and custom claims
+using System.Security.Claims;
 using BizfreeApp.Services;
-using Microsoft.Extensions.FileProviders; // Required for PhysicalFileProvider
-using System.IO; // Required for Path.Combine
+using Microsoft.Extensions.FileProviders;
+using System.IO;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add DbContext
+// Add DbContext using Railway-provided environment variable
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("DefaultConnection") ?? 
+        Environment.GetEnvironmentVariable("Host=localhost;Database=\"Bizfree Db\";Username=postgres;Password=123456;Port=5432") // Railway uses this by default
+    )
+);
 
 // Configure CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll",
-        policy => policy.AllowAnyOrigin() // In production, replace with specific origins: .WithOrigins("http://localhost:4200", "https://yourfrontend.com")
+        policy => policy.AllowAnyOrigin()
                         .AllowAnyMethod()
                         .AllowAnyHeader());
 });
@@ -26,18 +30,25 @@ builder.Services.AddCors(options =>
 // Add controllers
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
-          options.JsonSerializerOptions.MaxDepth = 256; // You might want to increase this as well if cycles are deep
-}); 
+    options.JsonSerializerOptions.MaxDepth = 256;
+});
+
 builder.Services.AddScoped<IUploadHandler, UploadHandler>();
 
-// Configure Swagger/OpenAPI
+// Configure Swagger (enabled only in development)
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 // Configure JWT Authentication
 var jwtSettings = builder.Configuration.GetSection("Jwt");
-// Ensure the Key exists and is long enough for HS256 (minimum 32 bytes for SHA256)
-var key = Encoding.ASCII.GetBytes(jwtSettings["Key"] ?? throw new InvalidOperationException("JWT Key not found in configuration."));
+var jwtKey = jwtSettings["Key"] ?? Environment.GetEnvironmentVariable("JWT_KEY");
+
+if (string.IsNullOrWhiteSpace(jwtKey))
+{
+    throw new InvalidOperationException("JWT Key not configured.");
+}
+
+var key = Encoding.ASCII.GetBytes(jwtKey);
 
 builder.Services.AddAuthentication(options =>
 {
@@ -49,47 +60,33 @@ builder.Services.AddAuthentication(options =>
     options.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
-        ValidIssuer = jwtSettings["Issuer"],
+        ValidIssuer = jwtSettings["Issuer"] ?? Environment.GetEnvironmentVariable("JWT_ISSUER"),
 
         ValidateAudience = true,
-        ValidAudience = jwtSettings["Audience"],
+        ValidAudience = jwtSettings["Audience"] ?? Environment.GetEnvironmentVariable("JWT_AUDIENCE"),
 
         ValidateIssuerSigningKey = true,
         IssuerSigningKey = new SymmetricSecurityKey(key),
 
         ValidateLifetime = true,
-        ClockSkew = TimeSpan.Zero // optional: no extra tolerance time
+        ClockSkew = TimeSpan.Zero
     };
 });
 
-// Configure Authorization services and policies
+// Authorization Policies
 builder.Services.AddAuthorization(options =>
 {
-    // Policy for general authenticated users (redundant but good for clarity)
     options.AddPolicy("AuthenticatedUser", policy => policy.RequireAuthenticatedUser());
-
-    // Policy requiring the 'Admin' role (based on the standard ClaimTypes.Role)
     options.AddPolicy("RequireAdminRole", policy => policy.RequireRole("Admin"));
-
-    // Policy requiring a specific custom RoleId (e.g., RoleId "1" for an Admin role)
-    options.AddPolicy("RequireSpecificRoleId", policy =>
-        policy.RequireClaim("RoleId", "1")); // Assuming "1" is the ID for the admin role in your DB
-
-    // Policy requiring a specific custom CompanyId (e.g., CompanyId "100")
-    options.AddPolicy("RequireSpecificCompanyAccess", policy =>
-        policy.RequireClaim("CompanyId", "100"));
-
-    // Combined policy: Requires both a CompanyId and RoleId "1" (e.g., Company Admin)
+    options.AddPolicy("RequireSpecificRoleId", policy => policy.RequireClaim("RoleId", "1"));
+    options.AddPolicy("RequireSpecificCompanyAccess", policy => policy.RequireClaim("CompanyId", "100"));
     options.AddPolicy("CompanyAdminAccess", policy =>
-        policy.RequireClaim("CompanyId") // Must have a CompanyId claim
-              .RequireClaim("RoleId", "1")); // And the RoleId must be "1"
+        policy.RequireClaim("CompanyId").RequireClaim("RoleId", "1"));
 
-    // Example of a more complex policy using RequireAssertion for dynamic logic
     options.AddPolicy("CanViewSensitiveData", policy =>
         policy.RequireAuthenticatedUser()
               .RequireAssertion(context =>
               {
-                  // Check if the user has both CompanyId and RoleId claims
                   var companyIdClaim = context.User.FindFirst("CompanyId");
                   var roleIdClaim = context.User.FindFirst("RoleId");
 
@@ -97,29 +94,28 @@ builder.Services.AddAuthorization(options =>
                       !int.TryParse(companyIdClaim.Value, out int companyId) ||
                       !int.TryParse(roleIdClaim.Value, out int roleId))
                   {
-                      return false; // Claims missing or invalid
+                      return false;
                   }
 
-                  // Example logic: Only allow if companyId is 100 AND roleId is 1 or 2
                   return companyId == 100 && (roleId == 1 || roleId == 2);
-              })
-    );
+              }));
 });
 
-
 var app = builder.Build();
+
+// Run migrations on startup (for Railway)
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
     db.Database.Migrate();
 }
 
-// Configure the HTTP request pipeline.
+// Middleware configuration
 if (app.Environment.IsDevelopment())
 {
+    app.UseDeveloperExceptionPage();
     app.UseSwagger();
     app.UseSwaggerUI();
-    app.UseDeveloperExceptionPage(); // Good for dev, helps see detailed errors
 }
 else
 {
@@ -127,33 +123,27 @@ else
 }
 
 app.UseCors("AllowAll");
-
 app.UseHttpsRedirection();
 
-
+// Uploads folder for static files
 var uploadsPath = Path.Combine(builder.Environment.ContentRootPath, "Uploads");
 if (!Directory.Exists(uploadsPath))
 {
     Directory.CreateDirectory(uploadsPath);
 }
-
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(uploadsPath),
     RequestPath = "/Uploads"
 });
 
-app.UseRouting(); // This should come after UseStaticFiles if static files are not routed by controllers.
-
-// **IMPORTANT: Add Authentication middleware before Authorization**
+app.UseRouting();
 app.UseAuthentication();
-
 app.UseAuthorization();
-
 app.MapControllers();
 
-// Explicitly configure Kestrel to listen on port 80 if running in Docker
-//var port = Environment.GetEnvironmentVariable("PORT") ?? "80";
-//app.Urls.Add($"http://*:{port}");
+// Railway sets PORT environment variable
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+app.Urls.Add($"http://*:{port}");
 
 app.Run();
