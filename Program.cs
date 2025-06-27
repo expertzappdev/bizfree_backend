@@ -126,11 +126,16 @@ app.UseCors("AllowAll");
 app.UseHttpsRedirection();
 
 
+var uploadsPath = Path.Combine(builder.Environment.ContentRootPath, "Uploads");
+if (!Directory.Exists(uploadsPath))
+{
+    Directory.CreateDirectory(uploadsPath);
+}
+
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(
-        Path.Combine(builder.Environment.ContentRootPath, "Uploads")),
-    RequestPath = "/Uploads" // This means files saved in `ContentRootPath/Uploads` will be accessible via URLs like `/Uploads/ProjectDocuments/your-file.pdf`
+    FileProvider = new PhysicalFileProvider(uploadsPath),
+    RequestPath = "/Uploads"
 });
 
 app.UseRouting(); // This should come after UseStaticFiles if static files are not routed by controllers.
