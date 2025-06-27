@@ -12,11 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add DbContext using Railway-provided environment variable
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection") ?? 
-        Environment.GetEnvironmentVariable("Host=localhost;Database=\"Bizfree Db\";Username=postgres;Password=123456;Port=5432") // Railway uses this by default
-    )
-);
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Configure CORS
 builder.Services.AddCors(options =>
